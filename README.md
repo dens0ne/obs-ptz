@@ -38,6 +38,34 @@ Features:
 - [PTZ Controls on GitHub](https://github.com/glikely/obs-ptz)
 - [PTZ Controls on Crowdin (translations)](https://crowdin.com/project/obs-ptz)
 
+# Manual Installation (Windows)
+
+The `dist/` folder in this repository contains pre-built binaries for Windows x64.
+
+> **Security note:** The DLLs in `dist/` are personal builds and cannot be
+> code-reviewed like source files. If you did not build them yourself,
+> build from source instead of trusting these binaries.
+
+1. **Copy the plugin DLL and its Qt dependency** to the OBS plugins folder:
+   ```
+   copy dist\obs-ptz.dll "C:\Program Files\obs-studio\obs-plugins\64bit\"
+   copy dist\Qt6SerialPort.dll "C:\Program Files\obs-studio\obs-plugins\64bit\"
+   ```
+
+2. **Copy the data folder** (locale strings and other assets):
+   ```
+   xcopy /E /I /Y data "C:\Program Files\obs-studio\data\obs-plugins\obs-ptz"
+   ```
+
+3. **Restart OBS Studio.**
+
+To verify it loaded, check `Help → Log Files → View Current Log` and look for a
+line containing `obs-ptz`. If it failed to load, the log will say why.
+
+> **Note:** If OBS shows an error about a missing DLL when loading the plugin,
+> you may need to install the
+> [Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe).
+
 # User Guide
 
 ## Installation
