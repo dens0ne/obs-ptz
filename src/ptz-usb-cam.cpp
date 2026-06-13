@@ -281,6 +281,24 @@ public:
 			filter_->Release();
 		}
 	}
+	double readHardwareTilt() const override
+	{
+		if (!cam_control_)
+			return now_pos.tilt;
+		long tilt, flags;
+		if (SUCCEEDED(cam_control_->Get(CameraControl_Tilt, &tilt, &flags)))
+			return static_cast<double>(tilt) / max.tilt;
+		return now_pos.tilt;
+	}
+	double readHardwarePan() const override
+	{
+		if (!cam_control_)
+			return now_pos.pan;
+		long pan, flags;
+		if (SUCCEEDED(cam_control_->Get(CameraControl_Pan, &pan, &flags)))
+			return static_cast<double>(pan) / max.pan;
+		return now_pos.pan;
+	}
 	bool isValid() const override { return cam_control_ != nullptr; }
 };
 #endif
@@ -308,9 +326,16 @@ QString PTZUSBCam::description()
 	return QString(obs_module_text("PTZ.UVC.Name"));
 }
 
+void PTZUSBCam::getDefaults(OBSData defaults) const
+{
+	PTZDevice::getDefaults(defaults);
+	obs_data_set_default_double(defaults, "preset_transition_speed", 0.0);
+}
+
 void PTZUSBCam::update(OBSData config)
 {
 	PTZDevice::update(config);
+	preset_transition_speed = obs_data_get_double(config, "preset_transition_speed");
 	OBSDataArrayAutoRelease presetArray = obs_data_get_array(config, "presets_memory");
 	size_t count = obs_data_array_count(presetArray);
 	for (size_t i = 0; i < count; ++i) {
@@ -347,12 +372,25 @@ void PTZUSBCam::save(OBSData config) const
 		obs_data_array_push_back(presetArray, presetData);
 	}
 	obs_data_set_array(config, "presets_memory", presetArray);
+	obs_data_set_double(config, "preset_transition_speed", preset_transition_speed);
 }
 
 obs_properties_t *PTZUSBCam::get_obs_properties()
 {
 	obs_properties_t *ptz_props = PTZDevice::get_obs_properties();
 	obs_properties_remove_by_name(ptz_props, "interface");
+
+	obs_property_t *general_prop = obs_properties_get(ptz_props, "general");
+	obs_properties_t *general = obs_property_group_content(general_prop);
+	obs_property_t *speed_list =
+		obs_properties_add_list(general, "preset_transition_speed",
+					obs_module_text("PTZ.UVC.PresetTransitionSpeed"),
+					OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_FLOAT);
+	obs_property_list_add_float(speed_list, obs_module_text("PTZ.UVC.PresetTransitionSpeed.Instant"), 0.0);
+	obs_property_list_add_float(speed_list, obs_module_text("PTZ.UVC.PresetTransitionSpeed.Slow"), 0.020);
+	obs_property_list_add_float(speed_list, obs_module_text("PTZ.UVC.PresetTransitionSpeed.Medium"), 0.050);
+	obs_property_list_add_float(speed_list, obs_module_text("PTZ.UVC.PresetTransitionSpeed.Fast"), 0.100);
+
 	return ptz_props;
 }
 
@@ -407,8 +445,97 @@ PTZControl *PTZUSBCam::get_ptz_control()
 void PTZUSBCam::ptz_tick(float seconds)
 {
 	tick_elapsed += seconds;
+
+	if (preset_transitioning) {
+		if (std::abs(pan_speed) > 0.001 || std::abs(tilt_speed) > 0.001 || std::abs(zoom_speed) > 0.001) {
+			blog(LOG_INFO, "[obs-ptz] transition cancelled by joystick input");
+			preset_transitioning = false;
+			// fall through to regular joystick handling below
+		} else {
+			double frame_time = static_cast<double>(seconds) < 0.05 ? static_cast<double>(seconds) : 0.05;
+			transition_elapsed += frame_time;
+			transition_cmd_elapsed += frame_time;
+			transition_log_elapsed += frame_time;
+			transition_hw_read_elapsed += frame_time;
+			double t = transition_elapsed / preset_transition_duration;
+			if (t > 1.0)
+				t = 1.0;
+
+			// Send camera commands at ~30 Hz to avoid overwhelming the
+			// camera's command buffer. Always send the final frame.
+			bool send_cmd = (transition_cmd_elapsed >= 0.033) || (t >= 1.0);
+			if (send_cmd) {
+				transition_cmd_elapsed = 0.0;
+				auto ptzctrl = get_ptz_control();
+				if (ptzctrl) {
+					// Refresh hardware position at 5 Hz to minimise USB bandwidth pressure.
+					// Reads at every 30 Hz command cycle caused contention with the video stream.
+					if (transition_hw_read_elapsed >= 0.2) {
+						transition_hw_read_elapsed = 0.0;
+						hw_pan_cached = ptzctrl->readHardwarePan();
+						hw_tilt_cached = ptzctrl->readHardwareTilt();
+					}
+					double hw_pan = hw_pan_cached;
+					double hw_tilt = hw_tilt_cached;
+
+					// Time-based desired position
+					double desired_pan = preset_start.pan + t * (preset_target.pan - preset_start.pan);
+					double desired_tilt =
+						preset_start.tilt + t * (preset_target.tilt - preset_start.tilt);
+
+					// Cap commanded position to no more than max_lead ahead of hardware.
+					// If the camera servo stalls, we slow down with it so there is no
+					// large catch-up sprint when it unfreezes.
+					const double max_lead = 0.05;
+					double new_pan = desired_pan;
+					if (preset_target.pan < preset_start.pan)
+						new_pan = desired_pan > hw_pan - max_lead ? desired_pan : hw_pan - max_lead;
+					else if (preset_target.pan > preset_start.pan)
+						new_pan = desired_pan < hw_pan + max_lead ? desired_pan : hw_pan + max_lead;
+
+					double new_tilt = desired_tilt;
+					if (preset_target.tilt < preset_start.tilt)
+						new_tilt = desired_tilt > hw_tilt - max_lead ? desired_tilt
+										      : hw_tilt - max_lead;
+					else if (preset_target.tilt > preset_start.tilt)
+						new_tilt = desired_tilt < hw_tilt + max_lead ? desired_tilt
+										      : hw_tilt + max_lead;
+
+					ptzctrl->pan(new_pan);
+					ptzctrl->tilt(new_tilt);
+					if (preset_target.zoom != preset_start.zoom) {
+						double new_zoom =
+							preset_start.zoom + t * (preset_target.zoom - preset_start.zoom);
+						ptzctrl->zoom(new_zoom);
+					}
+
+					// Log once per second for diagnostics
+					if (transition_log_elapsed >= 1.0) {
+						transition_log_elapsed = 0.0;
+						blog(LOG_INFO,
+						     "[obs-ptz] t=%.2f cmd_pan=%.3f hw_pan=%.3f pan_lag=%.3f | cmd_tilt=%.3f hw_tilt=%.3f tilt_lag=%.3f",
+						     t, new_pan, hw_pan, hw_pan - new_pan,
+						     new_tilt, hw_tilt, hw_tilt - new_tilt);
+					}
+
+					if (t >= 1.0) {
+						ptzctrl->setAutoFocus(preset_target.focusAuto);
+						if (!preset_target.focusAuto)
+							ptzctrl->focus(preset_target.focus);
+						preset_transitioning = false;
+						blog(LOG_INFO, "[obs-ptz] transition complete after %.1fs",
+						     transition_elapsed);
+					}
+				}
+			}
+			tick_elapsed = 0.0f;
+			return;
+		}
+	}
+
 	if (tick_elapsed < 0.03f)
 		return;
+
 	if (pan_speed != 0.0 || tilt_speed != 0.0) {
 		pantilt_rel(pan_speed * tick_elapsed, tilt_speed * tick_elapsed);
 	}
@@ -492,10 +619,48 @@ void PTZUSBCam::memory_recall(int i)
 {
 	if (!presets.contains(i))
 		return;
-	auto now_pos = presets[i];
-	pantilt_abs(now_pos.pan, now_pos.tilt);
-	zoom_abs(now_pos.zoom);
-	set_autofocus(now_pos.focusAuto);
-	if (!now_pos.focusAuto)
-		focus_abs(now_pos.focus);
+	preset_target = presets[i];
+	if (preset_transition_speed > 0.0) {
+		auto ptzctrl = get_ptz_control();
+		if (ptzctrl) {
+			preset_start = ptzctrl->getPosition();
+			hw_pan_cached = ptzctrl->readHardwarePan();
+			hw_tilt_cached = ptzctrl->readHardwareTilt();
+		} else {
+			blog(LOG_WARNING, "[obs-ptz] no PTZ control at recall time, cancelling transition");
+			preset_start = preset_target;
+			hw_pan_cached = preset_target.pan;
+			hw_tilt_cached = preset_target.tilt;
+		}
+		double pan_dist = preset_target.pan - preset_start.pan;
+		double tilt_dist = preset_target.tilt - preset_start.tilt;
+		if (pan_dist < 0.0)
+			pan_dist = -pan_dist;
+		if (tilt_dist < 0.0)
+			tilt_dist = -tilt_dist;
+		double distance = pan_dist > tilt_dist ? pan_dist : tilt_dist;
+		if (distance < 0.001) {
+			pantilt_abs(preset_target.pan, preset_target.tilt);
+			zoom_abs(preset_target.zoom);
+			set_autofocus(preset_target.focusAuto);
+			if (!preset_target.focusAuto)
+				focus_abs(preset_target.focus);
+			return;
+		}
+		preset_transition_duration = distance / preset_transition_speed;
+		transition_elapsed = 0.0;
+		transition_cmd_elapsed = 0.0;
+		transition_log_elapsed = 0.0;
+		transition_hw_read_elapsed = 0.0;
+		preset_transitioning = true;
+		blog(LOG_INFO, "[obs-ptz] transition start: pan %.3f->%.3f tilt %.3f->%.3f zoom %.3f->%.3f dur=%.1fs",
+		     preset_start.pan, preset_target.pan, preset_start.tilt, preset_target.tilt,
+		     preset_start.zoom, preset_target.zoom, preset_transition_duration);
+		return;
+	}
+	pantilt_abs(preset_target.pan, preset_target.tilt);
+	zoom_abs(preset_target.zoom);
+	set_autofocus(preset_target.focusAuto);
+	if (!preset_target.focusAuto)
+		focus_abs(preset_target.focus);
 }

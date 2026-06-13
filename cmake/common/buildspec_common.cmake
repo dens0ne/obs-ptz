@@ -52,6 +52,16 @@ function(_setup_qt_submodule)
     set(_cmake_config RelWithDebInfo)
     set(_cmake_arch "")
     set(_cmake_extra "")
+    set(_cmake_compiler
+        "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}"
+        "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+        "-DCMAKE_LINKER=${CMAKE_LINKER}"
+        "-DCMAKE_MT=${CMAKE_MT}"
+        "-DCMAKE_RC_COMPILER=${CMAKE_RC_COMPILER}"
+        "-DCMAKE_C_COMPILER_ARCHITECTURE_ID=x64"
+        "-DCMAKE_CXX_COMPILER_ARCHITECTURE_ID=x64"
+        "-DCMAKE_SIZEOF_VOID_P=8"
+    )
   elseif(OS_MACOS)
     set(_cmake_config Release)
     set(_cmake_arch "-DCMAKE_OSX_ARCHITECTURES:STRING='arm64;x86_64'")
@@ -59,6 +69,7 @@ function(_setup_qt_submodule)
       _cmake_extra
       "-DCMAKE_OSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET} -DQT_NO_APPLE_SDK_MAX_VERSION_CHECK=ON -DFEATURE_separate_debug_info:BOOL=ON"
     )
+    set(_cmake_compiler "")
   endif()
 
   message(STATUS "Configure ${label} (${arch})")
@@ -68,6 +79,7 @@ function(_setup_qt_submodule)
       "-DCMAKE_INSTALL_PREFIX='${dependencies_dir}/${_qt6_destination}'"
       "-DCMAKE_PREFIX_PATH='${dependencies_dir}/${_qt6_destination}'" "--no-warn-unused-cli"
       "-DBUILD_SHARED_LIBS:BOOL=ON" "-DCMAKE_BUILD_TYPE=${_cmake_config}" "${_cmake_extra}"
+      ${_cmake_compiler}
     WORKING_DIRECTORY "${dependencies_dir}/${destination}"
     RESULT_VARIABLE _process_result
     COMMAND_ERROR_IS_FATAL ANY
@@ -99,10 +111,21 @@ function(_setup_sdl)
     set(_cmake_config RelWithDebInfo)
     set(_cmake_arch "")
     set(_cmake_extra "")
+    set(_cmake_compiler
+        "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}"
+        "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+        "-DCMAKE_LINKER=${CMAKE_LINKER}"
+        "-DCMAKE_MT=${CMAKE_MT}"
+        "-DCMAKE_RC_COMPILER=${CMAKE_RC_COMPILER}"
+        "-DCMAKE_C_COMPILER_ARCHITECTURE_ID=x64"
+        "-DCMAKE_CXX_COMPILER_ARCHITECTURE_ID=x64"
+        "-DCMAKE_SIZEOF_VOID_P=8"
+    )
   elseif(OS_MACOS)
     set(_cmake_config Release)
     set(_cmake_arch "-DCMAKE_OSX_ARCHITECTURES:STRING='arm64;x86_64'")
     set(_cmake_extra "-DCMAKE_OSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    set(_cmake_compiler "")
   endif()
 
   message(STATUS "Configure ${label} (${arch})")
@@ -112,6 +135,7 @@ function(_setup_sdl)
       "-DCMAKE_INSTALL_PREFIX='${dependencies_dir}/sdl'"
       "-DCMAKE_PREFIX_PATH='${dependencies_dir}/sdl" "--no-warn-unused-cli"
       "-DBUILD_SHARED_LIBS:BOOL=OFF" "-DCMAKE_BUILD_TYPE=${_cmake_config}" "${_cmake_extra}"
+      ${_cmake_compiler}
     WORKING_DIRECTORY "${dependencies_dir}/${destination}"
     RESULT_VARIABLE _process_result
     COMMAND_ERROR_IS_FATAL ANY
@@ -143,10 +167,40 @@ function(_setup_obs_studio)
     set(_is_fresh --fresh)
   endif()
 
+  # Patch OBS architecture.cmake to skip the x86 sub-build when using Ninja.
+  # The x86 child build (win-capture/graphics-hook, virtualcam-module) is a VS
+  # generator concept not needed for plugin development.
+  if(OS_WINDOWS)
+    set(_obs_arch_cmake "${dependencies_dir}/${_obs_destination}/cmake/windows/architecture.cmake")
+    if(EXISTS "${_obs_arch_cmake}")
+      file(READ "${_obs_arch_cmake}" _arch_content)
+      string(REPLACE
+        "elseif(OBS_PARENT_ARCHITECTURE STREQUAL x64)"
+        "elseif(OBS_PARENT_ARCHITECTURE STREQUAL x64 AND NOT CMAKE_GENERATOR MATCHES \"Ninja\")"
+        _arch_content "${_arch_content}"
+      )
+      file(WRITE "${_obs_arch_cmake}" "${_arch_content}")
+    endif()
+  endif()
+
   if(OS_WINDOWS)
     set(_cmake_generator "${CMAKE_GENERATOR}")
-    set(_cmake_arch "-A ${arch},version=${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}")
-    set(_cmake_extra "-DCMAKE_SYSTEM_VERSION=${CMAKE_SYSTEM_VERSION} -DCMAKE_ENABLE_SCRIPTING=OFF")
+    set(_cmake_arch "")
+    set(_cmake_extra
+        "-DCMAKE_BUILD_TYPE=RelWithDebInfo"
+        "-DCMAKE_SYSTEM_VERSION=${CMAKE_SYSTEM_VERSION}"
+        "-DCMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION=${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}"
+        "-DCMAKE_VS_PLATFORM_NAME=${CMAKE_VS_PLATFORM_NAME}"
+        "-DCMAKE_ENABLE_SCRIPTING=OFF"
+        "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}"
+        "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+        "-DCMAKE_LINKER=${CMAKE_LINKER}"
+        "-DCMAKE_MT=${CMAKE_MT}"
+        "-DCMAKE_RC_COMPILER=${CMAKE_RC_COMPILER}"
+        "-DCMAKE_C_COMPILER_ARCHITECTURE_ID=x64"
+        "-DCMAKE_CXX_COMPILER_ARCHITECTURE_ID=x64"
+        "-DCMAKE_SIZEOF_VOID_P=8"
+    )
   elseif(OS_MACOS)
     set(_cmake_generator "Xcode")
     set(_cmake_arch "-DCMAKE_OSX_ARCHITECTURES:STRING='arm64;x86_64'")
@@ -167,38 +221,20 @@ function(_setup_obs_studio)
   )
   message(STATUS "Configure ${label} (${arch}) - done")
 
-  message(STATUS "Build ${label} (Debug - ${arch})")
+  message(STATUS "Build ${label} (RelWithDebInfo - ${arch})")
   execute_process(
-    COMMAND "${CMAKE_COMMAND}" --build build_${arch} --target obs-frontend-api --config Debug --parallel
+    COMMAND "${CMAKE_COMMAND}" --build build_${arch} --target obs-frontend-api --config RelWithDebInfo --parallel
     WORKING_DIRECTORY "${dependencies_dir}/${_obs_destination}"
     RESULT_VARIABLE _process_result
     COMMAND_ERROR_IS_FATAL ANY
     OUTPUT_QUIET
   )
-  message(STATUS "Build ${label} (Debug - ${arch}) - done")
-
-  message(STATUS "Build ${label} (Release - ${arch})")
-  execute_process(
-    COMMAND "${CMAKE_COMMAND}" --build build_${arch} --target obs-frontend-api --config Release --parallel
-    WORKING_DIRECTORY "${dependencies_dir}/${_obs_destination}"
-    RESULT_VARIABLE _process_result
-    COMMAND_ERROR_IS_FATAL ANY
-    OUTPUT_QUIET
-  )
-  message(STATUS "Build ${label} (Reelase - ${arch}) - done")
+  message(STATUS "Build ${label} (RelWithDebInfo - ${arch}) - done")
 
   message(STATUS "Install ${label} (${arch})")
   execute_process(
     COMMAND
-      "${CMAKE_COMMAND}" --install build_${arch} --component Development --config Debug --prefix "${dependencies_dir}"
-    WORKING_DIRECTORY "${dependencies_dir}/${_obs_destination}"
-    RESULT_VARIABLE _process_result
-    COMMAND_ERROR_IS_FATAL ANY
-    OUTPUT_QUIET
-  )
-  execute_process(
-    COMMAND
-      "${CMAKE_COMMAND}" --install build_${arch} --component Development --config Release --prefix "${dependencies_dir}"
+      "${CMAKE_COMMAND}" --install build_${arch} --component Development --config RelWithDebInfo --prefix "${dependencies_dir}"
     WORKING_DIRECTORY "${dependencies_dir}/${_obs_destination}"
     RESULT_VARIABLE _process_result
     COMMAND_ERROR_IS_FATAL ANY

@@ -74,6 +74,8 @@ public:
 		return internal_focus(enabled, focus);
 	}
 	struct PtzUsbCamPos getPosition() const { return now_pos; }
+	virtual double readHardwareTilt() const { return now_pos.tilt; }
+	virtual double readHardwarePan() const { return now_pos.pan; }
 	std::string getDevicePath() { return device_path; }
 	virtual bool isValid() const = 0;
 };
@@ -88,6 +90,18 @@ private:
 	PTZControl *ptz_control_ = nullptr;
 	PTZControl *get_ptz_control();
 
+	double preset_transition_speed = 0.0;    // user setting: 0=instant, else normalized units/s
+	double preset_transition_duration = 0.0; // computed at recall: distance / speed
+	bool preset_transitioning = false;
+	PtzUsbCamPos preset_start;
+	PtzUsbCamPos preset_target;
+	double transition_elapsed = 0.0;
+	double transition_cmd_elapsed = 0.0;
+	double transition_log_elapsed = 0.0;
+	double transition_hw_read_elapsed = 0.0;
+	double hw_pan_cached = 0.0;
+	double hw_tilt_cached = 0.0;
+
 protected:
 	static void ptz_tick_callback(void *param, float seconds);
 	void ptz_tick(float seconds);
@@ -98,6 +112,7 @@ public:
 	void save(obs_data_t *settings) const;
 	QString description() override;
 
+	void getDefaults(OBSData defaults) const override;
 	void update(OBSData ptz_data) override;
 	void save(OBSData ptz_data) const override;
 	obs_properties_t *get_obs_properties() override;
