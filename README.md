@@ -46,18 +46,22 @@ The `dist/` folder in this repository contains pre-built binaries for Windows x6
 > code-reviewed like source files. If you did not build them yourself,
 > build from source instead of trusting these binaries.
 
-1. **Copy the plugin DLL and its Qt dependency** to the OBS plugins folder:
+1. **Copy the plugin DLL** to the OBS plugins folder:
    ```
    copy dist\obs-ptz.dll "C:\Program Files\obs-studio\obs-plugins\64bit\"
-   copy dist\Qt6SerialPort.dll "C:\Program Files\obs-studio\obs-plugins\64bit\"
    ```
 
-2. **Copy the data folder** (locale strings and other assets):
+2. **Copy the Qt dependency** to the OBS binary folder:
+   ```
+   copy dist\Qt6SerialPort.dll "C:\Program Files\obs-studio\bin\64bit\"
+   ```
+
+3. **Copy the data folder** (locale strings and other assets):
    ```
    xcopy /E /I /Y data "C:\Program Files\obs-studio\data\obs-plugins\obs-ptz"
    ```
 
-3. **Restart OBS Studio.**
+4. **Restart OBS Studio.**
 
 To verify it loaded, check `Help → Log Files → View Current Log` and look for a
 line containing `obs-ptz`. If it failed to load, the log will say why.
